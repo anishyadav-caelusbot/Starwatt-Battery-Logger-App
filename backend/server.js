@@ -96,7 +96,7 @@ if (didOverride) {
 let influxQueryApi = null;
 let isMockModeActive = true;
 
-function connectToInflux(config) {
+async function connectToInflux(config) {
   if (config.mockMode || !config.token) {
     influxQueryApi = null;
     isMockModeActive = true;
@@ -106,15 +106,25 @@ function connectToInflux(config) {
 
   try {
     const influxDB = new InfluxDB({ url: config.url, token: config.token });
-    influxQueryApi = influxDB.getQueryApi(config.org);
+    const queryApi = influxDB.getQueryApi(config.org);
+
+    // Test connectivity and permissions by running a minimal query
+    const testQuery = `
+      from(bucket: "${config.bucket}")
+        |> range(start: -1m)
+        |> limit(n: 1)
+    `;
+    await queryApi.collectRows(testQuery);
+
+    influxQueryApi = queryApi;
     isMockModeActive = false;
-    console.log(`Successfully connected to InfluxDB at ${config.url}`);
+    console.log(`Successfully connected and authenticated to InfluxDB at ${config.url}`);
     return { success: true, mode: 'live' };
   } catch (err) {
-    console.error(`Error connecting to InfluxDB at ${config.url}:`, err);
+    console.error(`Error connecting to InfluxDB at ${config.url}:`, err.message || err);
     influxQueryApi = null;
     isMockModeActive = true;
-    return { success: false, error: err.message, mode: 'mock' };
+    return { success: false, error: err.message || String(err), mode: 'mock' };
   }
 }
 
@@ -668,7 +678,7 @@ app.get('/api/db-config', (req, res) => {
 });
 
 // 7. Save Database Configuration & Test Connection
-app.post('/api/db-config', (req, res) => {
+app.post('/api/db-config', async (req, res) => {
   const { url, token, org, bucket, mockMode } = req.body;
 
   const testConfig = {
@@ -679,7 +689,7 @@ app.post('/api/db-config', (req, res) => {
     mockMode: mockMode === undefined ? false : !!mockMode
   };
 
-  const testResult = connectToInflux(testConfig);
+  const testResult = await connectToInflux(testConfig);
 
   if (testResult.success) {
     activeConfig = testConfig;
