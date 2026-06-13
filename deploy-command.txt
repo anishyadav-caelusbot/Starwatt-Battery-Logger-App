@@ -1,0 +1,14 @@
+================================================================================
+   Linux / macOS Deployment Command
+================================================================================
+Copy and paste this single command on your remote Linux server:
+
+git clone https://github.com/anishyadav-caelusbot/Starwatt-Battery-Logger-App.git && cd Starwatt-Battery-Logger-App && chmod +x deploy.sh && ./deploy.sh
+
+
+================================================================================
+   Windows Deployment Command (CMD / PowerShell)
+================================================================================
+Copy and paste this single command on your Windows server:
+
+git clone https://github.com/anishyadav-caelusbot/Starwatt-Battery-Logger-App.git && cd Starwatt-Battery-Logger-App && deploy.bat

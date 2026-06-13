@@ -65,17 +65,24 @@ All logins and email alerts have been removed, while adding interactive charting
 
 ## Server Git Deployment (One Command)
 
-To deploy the dashboard on a fresh remote server directly from your GitHub repository with a single command line, execute the following block:
+To deploy the dashboard on a fresh remote server directly from your GitHub repository, run this single command:
 
+**For Linux / macOS Servers:**
 ```bash
-git clone <YOUR_GITHUB_REPO_URL> && cd <REPO_NAME>/BatteryLoggerApp && docker-compose up --build -d
+git clone https://github.com/anishyadav-caelusbot/Starwatt-Battery-Logger-App.git && cd Starwatt-Battery-Logger-App && chmod +x deploy.sh && ./deploy.sh
+```
+
+**For Windows Servers:**
+```cmd
+git clone https://github.com/anishyadav-caelusbot/Starwatt-Battery-Logger-App.git && cd Starwatt-Battery-Logger-App && deploy.bat
 ```
 
 ### Passing InfluxDB Config Inline
-If you want to configure your live database connection variables immediately inside the same single command without manually editing files, you can pass the environment variables inline like this:
+If you want to configure your live database connection variables immediately inside the same single command without manually editing any `.env` files, you can pass the environment variables inline like this:
 
+**For Linux / macOS:**
 ```bash
-git clone <YOUR_GITHUB_REPO_URL> && cd <REPO_NAME>/BatteryLoggerApp && INFLUX_TOKEN="8971090763" INFLUX_URL="http://69.62.73.206:8086" INFLUX_ORG="starwatt" INFLUX_BUCKET="philips" MOCK_MODE="false" docker-compose up --build -d
+git clone https://github.com/anishyadav-caelusbot/Starwatt-Battery-Logger-App.git && cd Starwatt-Battery-Logger-App && INFLUX_TOKEN="8971090763" INFLUX_URL="http://69.62.73.206:8086" INFLUX_ORG="starwatt" INFLUX_BUCKET="philips" MOCK_MODE="false" ADMIN_USER="starwatt" ADMIN_PASS="Superman$12" docker-compose up --build -d
 ```
 
 ---
