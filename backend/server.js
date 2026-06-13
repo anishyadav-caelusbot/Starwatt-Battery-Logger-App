@@ -51,6 +51,48 @@ const defaultDbConfig = {
 
 let activeConfig = readJsonFile(DB_CONFIG_FILE, defaultDbConfig);
 
+// If environment variables are explicitly defined in the environment (e.g. via .env on container restart),
+// let them override the saved JSON config so that changes to .env actually take effect.
+let didOverride = false;
+if (process.env.INFLUX_URL && process.env.INFLUX_URL !== activeConfig.url) {
+  activeConfig.url = process.env.INFLUX_URL;
+  didOverride = true;
+}
+if (process.env.INFLUX_TOKEN && process.env.INFLUX_TOKEN !== activeConfig.token) {
+  activeConfig.token = process.env.INFLUX_TOKEN;
+  didOverride = true;
+}
+if (process.env.INFLUX_ORG && process.env.INFLUX_ORG !== activeConfig.org) {
+  activeConfig.org = process.env.INFLUX_ORG;
+  didOverride = true;
+}
+if (process.env.INFLUX_BUCKET && process.env.INFLUX_BUCKET !== activeConfig.bucket) {
+  activeConfig.bucket = process.env.INFLUX_BUCKET;
+  didOverride = true;
+}
+if (process.env.MOCK_MODE !== undefined) {
+  const isMockEnv = process.env.MOCK_MODE === 'true';
+  if (isMockEnv !== activeConfig.mockMode) {
+    activeConfig.mockMode = isMockEnv;
+    didOverride = true;
+  }
+}
+
+// Ensure mockMode is active if there is no token
+if (!activeConfig.token && !activeConfig.mockMode) {
+  activeConfig.mockMode = true;
+  didOverride = true;
+}
+
+if (didOverride) {
+  try {
+    fs.writeFileSync(DB_CONFIG_FILE, JSON.stringify(activeConfig, null, 2), 'utf8');
+    console.log('Database configuration overridden by environment variables and saved.');
+  } catch (err) {
+    console.error('Error writing overridden db_config.json:', err);
+  }
+}
+
 let influxQueryApi = null;
 let isMockModeActive = true;
 
