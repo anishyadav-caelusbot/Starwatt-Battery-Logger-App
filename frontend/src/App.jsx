@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, AreaChart, Sliders, Info, ShieldAlert, Cpu, Activity, RefreshCw } from 'lucide-react';
+import { LayoutDashboard, AreaChart, Sliders, Info, ShieldAlert, Cpu, Activity, RefreshCw, Zap } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import Analytics from './components/Analytics';
 import Offsets from './components/Offsets';
 import Login from './components/Login';
+import LiveTelemetry from './components/LiveTelemetry';
 
 // Lightweight, URL path-based SPA router
 function usePathRouting(defaultPath = '/home') {
@@ -16,7 +17,7 @@ function usePathRouting(defaultPath = '/home') {
 
   useEffect(() => {
     if (window.location.pathname === '/') {
-      window.history.replaceState(null, '', defaultPath);
+      window.history.replaceState(null, '', defaultPath + window.location.search);
     }
 
     const handlePopState = () => {
@@ -28,7 +29,8 @@ function usePathRouting(defaultPath = '/home') {
   }, [defaultPath]);
 
   const navigate = (path) => {
-    window.history.pushState(null, '', path);
+    const search = window.location.search;
+    window.history.pushState(null, '', path + search);
     setCurrentPath(path);
   };
 
@@ -44,11 +46,88 @@ function App() {
   const [error, setError] = useState(null);
   const [lastRefreshed, setLastRefreshed] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [filterOptions, setFilterOptions] = useState({
+    measurements: ['BatteryLogger'],
+    locations: ['Starwatt-Lab'],
+    devices: ['BatLog']
+  });
+
+  const fetchFilterOptions = async () => {
+    try {
+      const response = await fetch('/api/filter-options', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setFilterOptions(data);
+        return data;
+      }
+    } catch (err) {
+      console.error('Error fetching filter options:', err);
+    }
+    return null;
+  };
+  const getInitialFilter = () => {
+    const params = new URLSearchParams(window.location.search);
+    const measurement = params.get('measurement') || 'BatteryLogger';
+    const location = params.get('location') || 'Starwatt-Lab';
+    const device = params.get('device') || 'BatLog';
+    const testStartTime = params.get('testStartTime') || '0';
+    return { measurement, location, device, testStartTime };
+  };
+
+  const [filter, setFilter] = useState(getInitialFilter());
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    let changed = false;
+    if (params.get('measurement') !== filter.measurement) {
+      params.set('measurement', filter.measurement);
+      changed = true;
+    }
+    if (params.get('location') !== filter.location) {
+      params.set('location', filter.location);
+      changed = true;
+    }
+    if (params.get('device') !== filter.device) {
+      params.set('device', filter.device);
+      changed = true;
+    }
+    if (params.get('testStartTime') !== filter.testStartTime) {
+      params.set('testStartTime', filter.testStartTime);
+      changed = true;
+    }
+    if (changed) {
+      const newUrl = `${window.location.pathname}?${params.toString()}`;
+      window.history.replaceState(null, '', newUrl);
+    }
+  }, [filter]);
+
+  // Fetch active telemetry filters
+  const fetchFilter = async () => {
+    try {
+      const response = await fetch('/api/filter', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setFilter(data);
+        return data;
+      }
+    } catch (err) {
+      console.error('Error fetching filter settings:', err);
+    }
+    return null;
+  };
 
   // Fetch unique devices from backend
-  const fetchDevices = async () => {
+  const fetchDevices = async (activeFilter = filter) => {
     try {
-      const response = await fetch('/api/devices', {
+      const response = await fetch(`/api/devices?measurement=${activeFilter.measurement}`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('authToken')}`
         }
@@ -61,11 +140,11 @@ function App() {
     }
   };
 
-  // Fetch live telemetry for all devices
-  const fetchLiveTelemetry = async () => {
+  // Fetch live telemetry for devices matching filter
+  const fetchLiveTelemetry = async (activeFilter = filter) => {
     setIsRefreshing(true);
     try {
-      const response = await fetch('/api/live', {
+      const response = await fetch(`/api/live?measurement=${activeFilter.measurement}&location=${activeFilter.location}&device=${activeFilter.device}&testStartTime=${activeFilter.testStartTime}`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('authToken')}`
         }
@@ -77,17 +156,47 @@ function App() {
       setError(null);
     } catch (err) {
       console.error('Error fetching live data:', err);
-      setError('Telemetry server offline. Showing simulated offline readings.');
+      setError('Telemetry server offline. Please check your InfluxDB connection.');
     } finally {
       setLoading(false);
       setIsRefreshing(false);
     }
   };
 
+  // Save telemetry filter configuration
+  const handleSaveFilter = async (newFilter) => {
+    try {
+      const response = await fetch('/api/filter', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+        },
+        body: JSON.stringify(newFilter)
+      });
+      if (response.ok) {
+        setFilter(newFilter);
+        await fetchDevices(newFilter);
+        await fetchLiveTelemetry(newFilter);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to save filter settings:', err);
+    }
+    return false;
+  };
+
   useEffect(() => {
     if (isLoggedIn) {
-      fetchDevices();
-      fetchLiveTelemetry();
+      const initializeData = async () => {
+        await fetchFilterOptions();
+        const activeFilter = await fetchFilter();
+        const finalFilter = activeFilter || filter;
+        await fetchDevices(finalFilter);
+        await fetchLiveTelemetry(finalFilter);
+      };
+      
+      initializeData();
 
       // Auto-refresh live data every 10 seconds
       const interval = setInterval(() => {
@@ -121,6 +230,14 @@ function App() {
           </div>
 
           <div 
+            className={`nav-item ${currentPath === '/live' ? 'active' : ''}`}
+            onClick={() => navigate('/live')}
+          >
+            <Zap size={20} />
+            <span>Live Telemetry</span>
+          </div>
+
+          <div 
             className={`nav-item ${currentPath === '/analytics' ? 'active' : ''}`}
             onClick={() => navigate('/analytics')}
           >
@@ -139,8 +256,8 @@ function App() {
 
         <div className="sidebar-footer">
           <div className="status-indicator" style={{ marginBottom: '12px' }}>
-            <span className={`dot ${error ? 'dot-amber' : 'dot-green'}`}></span>
-            <span>{error ? 'Degraded (Simulated)' : 'Live Telemetry Active'}</span>
+            <span className={`dot ${error ? 'dot-red' : 'dot-green'}`}></span>
+            <span>{error ? 'Server Offline' : 'Live InfluxDB Active'}</span>
           </div>
           <button 
             className="btn btn-sm" 
@@ -172,11 +289,13 @@ function App() {
           <div>
             <h1 style={{ fontSize: '28px', fontWeight: '800' }}>
               {currentPath === '/home' && 'Battery Fleet Dashboard'}
+              {currentPath === '/live' && 'Live Telemetry & Diagnostics'}
               {currentPath === '/analytics' && 'Station Analytics & Charts'}
               {currentPath === '/calibration' && 'Sensor Calibration Offsets'}
             </h1>
             <p className="title-desc">
               {currentPath === '/home' && 'Live status and core health indexes for all connected hardware modules.'}
+              {currentPath === '/live' && 'High-frequency telemetry stream, detailed subsystem values, and test run comparison.'}
               {currentPath === '/analytics' && 'Detailed historical charts for all 24 parameters with custom range queries.'}
               {currentPath === '/calibration' && 'Apply permanent digital offsets to adjust voltage, current, and temperature probes.'}
             </p>
@@ -201,12 +320,12 @@ function App() {
 
         {error && (
           <div style={{
-            background: 'rgba(245, 158, 11, 0.1)',
-            border: '1px solid rgba(245, 158, 11, 0.3)',
+            background: 'rgba(239, 68, 68, 0.1)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
             borderRadius: '8px',
             padding: '12px 16px',
             marginBottom: '20px',
-            color: '#f59e0b',
+            color: '#ef4444',
             display: 'flex',
             alignItems: 'center',
             gap: '10px',
@@ -230,6 +349,17 @@ function App() {
                 liveData={liveData} 
                 onEditDetails={fetchLiveTelemetry} 
                 onNavigateToAnalytics={() => navigate('/analytics')} 
+                filter={filter}
+                onSaveFilter={handleSaveFilter}
+                filterOptions={filterOptions}
+              />
+            )}
+            {currentPath === '/live' && (
+              <LiveTelemetry 
+                devices={devices} 
+                filter={filter}
+                onSaveFilter={handleSaveFilter}
+                filterOptions={filterOptions}
               />
             )}
             {currentPath === '/analytics' && (

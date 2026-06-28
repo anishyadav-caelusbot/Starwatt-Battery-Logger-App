@@ -23,6 +23,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const OFFSETS_FILE = path.join(DATA_DIR, 'offsets.json');
 const DETAILS_FILE = path.join(DATA_DIR, 'device_details.json');
 const DB_CONFIG_FILE = path.join(DATA_DIR, 'db_config.json');
+const FILTER_FILE = path.join(DATA_DIR, 'device_filter.json');
 
 // Initialize local configurations
 function readJsonFile(filePath, defaultVal) {
@@ -40,16 +41,25 @@ function readJsonFile(filePath, defaultVal) {
 let offsets = readJsonFile(OFFSETS_FILE, {});
 let deviceDetails = readJsonFile(DETAILS_FILE, {});
 
+const defaultFilter = {
+  measurement: 'BatteryLogger',
+  location: 'Starwatt-Lab',
+  device: 'BatLog',
+  testStartTime: '0'
+};
+let deviceFilter = readJsonFile(FILTER_FILE, defaultFilter);
+
 // InfluxDB Dynamic Connection Configuration Setup
 const defaultDbConfig = {
   url: process.env.INFLUX_URL || 'http://host.docker.internal:8086',
   token: process.env.INFLUX_TOKEN || '',
   org: process.env.INFLUX_ORG || 'starwatt',
   bucket: process.env.INFLUX_BUCKET || 'philips',
-  mockMode: process.env.MOCK_MODE === 'true' || !process.env.INFLUX_TOKEN
+  mockMode: false
 };
 
 let activeConfig = readJsonFile(DB_CONFIG_FILE, defaultDbConfig);
+activeConfig.mockMode = false; // Always force mockMode to false
 
 // If environment variables are explicitly defined in the environment (e.g. via .env on container restart),
 // let them override the saved JSON config so that changes to .env actually take effect.
@@ -70,19 +80,7 @@ if (process.env.INFLUX_BUCKET && process.env.INFLUX_BUCKET !== activeConfig.buck
   activeConfig.bucket = process.env.INFLUX_BUCKET;
   didOverride = true;
 }
-if (process.env.MOCK_MODE !== undefined) {
-  const isMockEnv = process.env.MOCK_MODE === 'true';
-  if (isMockEnv !== activeConfig.mockMode) {
-    activeConfig.mockMode = isMockEnv;
-    didOverride = true;
-  }
-}
-
-// Ensure mockMode is active if there is no token
-if (!activeConfig.token && !activeConfig.mockMode) {
-  activeConfig.mockMode = true;
-  didOverride = true;
-}
+activeConfig.mockMode = false;
 
 if (didOverride) {
   try {
@@ -94,27 +92,34 @@ if (didOverride) {
 }
 
 let influxQueryApi = null;
-let isMockModeActive = true;
+let isMockModeActive = false;
+
+// Wrap any InfluxDB collectRows call with a configurable timeout
+function withTimeout(promise, ms = 10000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`InfluxDB query timed out after ${ms}ms`)), ms))
+  ]);
+}
 
 async function connectToInflux(config) {
-  if (config.mockMode || !config.token) {
+  if (!config.token) {
     influxQueryApi = null;
-    isMockModeActive = true;
-    console.log('Switched to Mock Telemetry Mode (simulation engine).');
-    return { success: true, mode: 'mock' };
+    isMockModeActive = false;
+    return { success: false, error: 'InfluxDB Token is required', mode: 'live' };
   }
 
   try {
     const influxDB = new InfluxDB({ url: config.url, token: config.token });
     const queryApi = influxDB.getQueryApi(config.org);
 
-    // Test connectivity and permissions by running a minimal query
+    // Test connectivity with a 8-second timeout
     const testQuery = `
       from(bucket: "${config.bucket}")
         |> range(start: -1m)
         |> limit(n: 1)
     `;
-    await queryApi.collectRows(testQuery);
+    await withTimeout(queryApi.collectRows(testQuery), 8000);
 
     influxQueryApi = queryApi;
     isMockModeActive = false;
@@ -123,231 +128,15 @@ async function connectToInflux(config) {
   } catch (err) {
     console.error(`Error connecting to InfluxDB at ${config.url}:`, err.message || err);
     influxQueryApi = null;
-    isMockModeActive = true;
-    return { success: false, error: err.message || String(err), mode: 'mock' };
+    isMockModeActive = false;
+    return { success: false, error: err.message || String(err), mode: 'live' };
   }
 }
 
 // Perform initial connection
 connectToInflux(activeConfig);
 
-// -------------------------------------------------------------
-// High-Fidelity LFP Battery Telemetry Simulation Engine
-// -------------------------------------------------------------
-const mockDevices = [
-  { device: 'BatteryLog', location: 'Starwatt-Lab', config: 'LFP-4S', otaEnabled: '1' },
-  { device: 'BatteryLog-Beta', location: 'Starwatt-Lab', config: 'LFP-8S', otaEnabled: '1' },
-  { device: 'BatteryLog-Gamma', location: 'Field-Station-A', config: 'NMC-13S', otaEnabled: '0' }
-];
-
-// In-memory simulator states for each mock device
-const simulatorStates = {};
-mockDevices.forEach(d => {
-  const isLFP4S = d.config === 'LFP-4S';
-  const isLFP8S = d.config === 'LFP-8S';
-  const cellCount = isLFP4S ? 4 : (isLFP8S ? 8 : 13);
-  const cellNominalV = isLFP4S || isLFP8S ? 3.2 : 3.7;
-  const capacityAh = isLFP4S ? 100 : (isLFP8S ? 200 : 50);
-
-  simulatorStates[d.device] = {
-    deviceInfo: d,
-    cellCount,
-    cellNominalV,
-    capacityAh,
-    soc: 45.0 + Math.random() * 20, // Start around middle SoC
-    soh: 98.5 + Math.random() * 1.5,
-    cycleCount: Math.floor(Math.random() * 10),
-    chargeDelivered: 110.0 + Math.random() * 100,
-    dischargeDelivered: 50.0 + Math.random() * 100,
-    energyWh: 180.0,
-    temperature: 28.0 + Math.random() * 5,
-    chargingPhase: 1, // CC
-    status: 1, // 1: Charging, 2: Discharging, 0: Idle, 3: Fault
-    chargingTime: 120.0,
-    dischargingTime: 0.0,
-    lastTime: Date.now(),
-    history: []
-  };
-
-  // Generate 2 hours of historical data at 30s intervals
-  const historyPoints = 240;
-  const timeStepMs = 30000;
-  let simulatedTime = Date.now() - (historyPoints * timeStepMs);
-
-  for (let i = 0; i < historyPoints; i++) {
-    simulatedTime += timeStepMs;
-    const telemetry = simulateNextStep(simulatorStates[d.device], timeStepMs, simulatedTime);
-    // Deep copy to store in history
-    simulatorStates[d.device].history.push({ ...telemetry });
-  }
-});
-
-// Periodic simulator updater (appends new reading every 5 seconds)
-setInterval(() => {
-  const timeStepMs = 5000;
-  const now = Date.now();
-  mockDevices.forEach(d => {
-    const state = simulatorStates[d.device];
-    const telemetry = simulateNextStep(state, timeStepMs, now);
-    state.history.push({ ...telemetry });
-    // Cap in-memory history at last 1000 points
-    if (state.history.length > 1000) {
-      state.history.shift();
-    }
-  });
-}, 5000);
-
-// Physics-based battery simulator step
-function simulateNextStep(state, timeStepMs, timestamp) {
-  const dtHours = timeStepMs / 3600000;
-  const dtSeconds = timeStepMs / 1000;
-
-  // 1. Cycle state machine (Charge / Discharge / Idle / Fault)
-  // Transition thresholds
-  if (state.status === 1) { // Charging
-    state.chargingTime += dtSeconds;
-    state.dischargingTime = 0.0;
-    // Charge current simulation (CC/CV behavior)
-    let baseCurrent = 15.0; // 15A charge
-    if (state.soc > 85.0) {
-      state.chargingPhase = 2; // CV phase
-      // Current tapers off as SoC approaches 100%
-      baseCurrent = 15.0 * (100.0 - state.soc) / 15.0;
-      if (baseCurrent < 0.2) baseCurrent = 0.2;
-    } else {
-      state.chargingPhase = 1; // CC phase
-    }
-    
-    state.current = baseCurrent + (Math.random() - 0.5) * 0.1; // Add minor noise
-    state.soc += (state.current * dtHours / state.capacityAh) * 100.0;
-    state.chargeDelivered += state.current * dtHours;
-
-    if (state.soc >= 100.0) {
-      state.soc = 100.0;
-      state.status = 2; // Transition to discharge
-      state.chargingPhase = 0;
-      state.cycleCount += 1;
-    }
-  } else if (state.status === 2) { // Discharging
-    state.dischargingTime += dtSeconds;
-    state.chargingTime = 0.0;
-    state.chargingPhase = 0;
-    
-    // Constant load discharge (e.g. -20A load)
-    const dischargeRate = -20.0;
-    state.current = dischargeRate + (Math.random() - 0.5) * 0.2;
-    state.soc += (state.current * dtHours / state.capacityAh) * 100.0;
-    state.dischargeDelivered += Math.abs(state.current) * dtHours;
-
-    if (state.soc <= 5.0) {
-      state.soc = 5.0;
-      state.status = 1; // Transition to charging
-    }
-  }
-
-  // 2. Battery properties calculation
-  // Open Circuit Voltage (OCV) curve based on SoC
-  let ocvCell = state.cellNominalV;
-  if (state.cellNominalV === 3.2) { // LFP Cell OCV Curve
-    if (state.soc > 90) ocvCell = 3.35 + 0.15 * (state.soc - 90) / 10;
-    else if (state.soc > 20) ocvCell = 3.18 + 0.17 * (state.soc - 20) / 70;
-    else ocvCell = 2.8 + 0.38 * state.soc / 20;
-  } else { // NMC Cell OCV Curve
-    ocvCell = 3.0 + 1.2 * (state.soc / 100.0);
-  }
-
-  // Internal Resistance (varies slightly with SoC and Temp)
-  const baseIR = 0.003; // cell resistance (ohms)
-  const cellIR = baseIR * (1.0 + (100.0 - state.soc) * 0.005 + Math.max(0, 35 - state.temperature) * 0.01);
-  state.internalResistance = cellIR * state.cellCount;
-
-  // Voltage = OCV + Current * IR
-  state.voltage = (ocvCell * state.cellCount) + (state.current * state.internalResistance);
-
-  // Limit voltage boundaries
-  const maxAllowable = state.cellCount * (state.cellNominalV === 3.2 ? 3.65 : 4.25);
-  const minAllowable = state.cellCount * (state.cellNominalV === 3.2 ? 2.5 : 2.8);
-  if (state.voltage > maxAllowable) state.voltage = maxAllowable;
-  if (state.voltage < minAllowable) state.voltage = minAllowable;
-
-  // Power
-  state.power = state.voltage * state.current;
-  
-  // Energy Wh
-  state.energyWh += Math.abs(state.power) * dtHours;
-
-  // C-rate
-  state.c_rate = Math.abs(state.current) / state.capacityAh;
-
-  // Voltage Slope (V / minute)
-  const prevPoint = state.history[state.history.length - 1];
-  if (prevPoint) {
-    state.voltageSlope = (state.voltage - prevPoint.Voltage) / (dtSeconds / 60.0);
-  } else {
-    state.voltageSlope = 0.0;
-  }
-
-  // Max / Min Cell Voltages (simulating slight cell mismatch)
-  const avgCellV = state.voltage / state.cellCount;
-  state.maxVoltage = avgCellV + 0.015 + Math.random() * 0.005;
-  state.minVoltage = avgCellV - 0.015 - Math.random() * 0.005;
-
-  // Thermodynamic heating: Temperature rises with I^2 * R, and cools towards ambient (25C)
-  const ambientTemp = 25.0;
-  const heatGenerated = Math.pow(state.current, 2) * state.internalResistance * 0.002;
-  const heatLost = (state.temperature - ambientTemp) * 0.003;
-  state.temperature += (heatGenerated - heatLost) * dtSeconds;
-  if (state.temperature > 80.0) state.temperature = 80.0; // clamp
-  if (state.temperature < 0.0) state.temperature = 0.0;
-
-  // Run time to Cutoff (hours)
-  if (state.status === 2 && state.power !== 0) {
-    state.runtimeToCutoff = (state.soc - 5.0) / 100.0 * state.capacityAh * (state.cellNominalV * state.cellCount) / Math.abs(state.power);
-  } else {
-    state.runtimeToCutoff = 0.0;
-  }
-
-  // Efficiency
-  state.efficiency = 0.95 - (state.internalResistance * 0.05);
-
-  // Pressure and Altitude (Starwatt lab static values with tiny fluctuations)
-  state.pressure = 972.06 + (Math.random() - 0.5) * 0.5;
-  state.altitude = 348.76 + (Math.random() - 0.5) * 0.1;
-  state.wifiRssi = Math.floor(-65 + (Math.random() - 0.5) * 6);
-
-  return {
-    _time: new Date(timestamp).toISOString(),
-    Location: state.deviceInfo.location,
-    Device: state.deviceInfo.device,
-    Config: state.deviceInfo.config,
-    OtaEnabled: state.deviceInfo.otaEnabled,
-    FirmwareVersion: '1.0.0',
-    Voltage: Number(state.voltage.toFixed(3)),
-    Current: Number(state.current.toFixed(4)),
-    Power: Number(state.power.toFixed(3)),
-    Energy: Number(state.energyWh.toFixed(2)),
-    ChargeDelivered: Number(state.chargeDelivered.toFixed(2)),
-    DischargeDelivered: Number(state.dischargeDelivered.toFixed(2)),
-    SoC: Number(state.soc.toFixed(1)),
-    SoH: Number(state.soh.toFixed(1)),
-    C_rate: Number(state.c_rate.toFixed(3)),
-    CycleCount: state.cycleCount,
-    VoltageSlope: Number(state.voltageSlope.toFixed(4)),
-    ChargingTime: Number(state.chargingTime.toFixed(2)),
-    DischargingTime: Number(state.dischargingTime.toFixed(2)),
-    RuntimeToCutoff: Number(state.runtimeToCutoff.toFixed(2)),
-    Efficiency: Number(state.efficiency.toFixed(2)),
-    MaxVoltage: Number(state.maxVoltage.toFixed(3)),
-    MinVoltage: Number(state.minVoltage.toFixed(3)),
-    InternalResistance: Number(state.internalResistance.toFixed(4)),
-    Status: state.status,
-    ChargingPhase: state.chargingPhase,
-    Temperature: Number(state.temperature.toFixed(2)),
-    Pressure: Number(state.pressure.toFixed(2)),
-    Altitude: Number(state.altitude.toFixed(2)),
-    WiFiRSSI: state.wifiRssi
-  };
-}
+// Simulator engine removed
 
 // Helper: Apply user-configured offsets to live or historic records
 function applyOffsets(record) {
@@ -408,68 +197,72 @@ app.use('/api', authenticate);
 
 // 2. Get unique devices list (Location, Device, Config, OtaEnabled)
 app.get('/api/devices', async (req, res) => {
-  if (isMockModeActive) {
-    return res.json(mockDevices);
-  }
+  const measurement = req.query.measurement || deviceFilter.measurement;
 
-  // Real InfluxDB query: group by Device and take the last record to preserve metadata tags (Location, Config, etc.)
+  // Real InfluxDB query: group by Device and Location, last() retrieves the last points of fields.
   const fluxQuery = `
     from(bucket: "${activeConfig.bucket}")
       |> range(start: -30d)
-      |> filter(fn: (r) => r["_measurement"] == "BatteryLogger")
-      |> keep(columns: ["Location", "Device", "Config", "OtaEnabled"])
-      |> group(columns: ["Device"])
+      |> filter(fn: (r) => r["_measurement"] == "${measurement}")
       |> last()
   `;
 
   try {
-    const results = [];
+    const resultsMap = {};
     const rows = await influxQueryApi.collectRows(fluxQuery);
     rows.forEach(row => {
-      results.push({
-        device: row.Device,
-        location: row.Location || 'Unknown',
-        config: row.Config || 'Unknown',
-        otaEnabled: row.OtaEnabled || '0'
-      });
+      const devKey = `${row.Location || 'Unknown'}_${row.Device}`;
+      if (!resultsMap[devKey]) {
+        resultsMap[devKey] = {
+          device: row.Device,
+          location: row.Location || 'Unknown',
+          config: 'Unknown',
+          otaEnabled: '0'
+        };
+      }
+      if (row._field === 'Config') {
+        resultsMap[devKey].config = String(row._value);
+      } else if (row._field === 'OtaEnabled') {
+        resultsMap[devKey].otaEnabled = String(row._value);
+      }
     });
-    // Fallback if DB is empty
-    if (results.length === 0) {
-      return res.json(mockDevices);
-    }
+
+    const results = Object.values(resultsMap);
     return res.json(results);
   } catch (err) {
     console.error('Error fetching unique devices from InfluxDB:', err);
-    return res.json(mockDevices); // Fallback to mock devices on error
+    return res.json([]);
   }
 });
 
-// 2. Get live telemetry values for all active devices (Dashboard)
+// 2. Get live telemetry values for active devices (Dashboard / Live Telemetry)
 app.get('/api/live', async (req, res) => {
-  if (isMockModeActive) {
-    const latestData = mockDevices.map(d => {
-      const state = simulatorStates[d.device];
-      const rawLatest = state.history[state.history.length - 1];
-      const calibrated = applyOffsets(rawLatest);
-      
-      // Inject user description details
-      const detailKey = `${d.location}_${d.device}`;
-      calibrated.testDetail = deviceDetails[detailKey] || '';
-      return calibrated;
-    });
-    return res.json(latestData);
+  const measurement = req.query.measurement || deviceFilter.measurement;
+  const location = req.query.location || deviceFilter.location;
+  const device = req.query.device || deviceFilter.device;
+  const testStartTime = req.query.testStartTime || deviceFilter.testStartTime;
+
+  let filterStr = `|> filter(fn: (r) => r["_measurement"] == "${measurement}")`;
+  if (location && location !== 'all') {
+    filterStr += `\n|> filter(fn: (r) => r["Location"] == "${location}")`;
+  }
+  if (device && device !== 'all') {
+    filterStr += `\n|> filter(fn: (r) => r["Device"] == "${device}")`;
+  }
+  if (testStartTime && testStartTime !== 'all') {
+    filterStr += `\n|> filter(fn: (r) => r["TestStartTime"] == "${testStartTime}")`;
   }
 
-  // Real InfluxDB query: get the last record of each field
+  // Real InfluxDB query: get the last record of each field, grouped by device
   const fluxQuery = `
     from(bucket: "${activeConfig.bucket}")
       |> range(start: -24h)
-      |> filter(fn: (r) => r["_measurement"] == "BatteryLogger")
+      ${filterStr}
       |> last()
   `;
 
   try {
-    const rows = await influxQueryApi.collectRows(fluxQuery);
+    const rows = await withTimeout(influxQueryApi.collectRows(fluxQuery), 12000);
     
     // Group records by device/location to reconstruct telemetry objects
     const devicesMap = {};
@@ -481,42 +274,49 @@ app.get('/api/live', async (req, res) => {
           _time: row._time,
           Location: row.Location,
           Device: row.Device,
-          Config: row.Config,
-          OtaEnabled: row.OtaEnabled,
-          FirmwareVersion: row.FirmwareVersion || '1.0.0',
+          TestStartTime: parseInt(row.TestStartTime) || 0
         };
       }
-      devicesMap[devKey][row._field] = parseFloat(row._value) || row._value;
+      const field = row._field;
+      const rawVal = row._value;
+      const numVal = parseFloat(rawVal);
+      // String fields from the ESP32 payload
+      if (field === 'Config' || field === 'FirmwareVersion' || field === 'OtaEnabled') {
+        devicesMap[devKey][field] = rawVal;
+      } else if (field === 'ChargingState') {
+        devicesMap[devKey]['Status'] = isNaN(numVal) ? 0 : numVal;
+      } else if (field === 'ChargingPhase') {
+        devicesMap[devKey]['ChargingPhase'] = isNaN(numVal) ? 0 : numVal;
+      } else {
+        devicesMap[devKey][field] = isNaN(numVal) ? rawVal : numVal;
+      }
     });
 
     const results = Object.values(devicesMap).map(rawRecord => {
+      rawRecord.Config = rawRecord.Config || 'Unknown';
+      rawRecord.FirmwareVersion = rawRecord.FirmwareVersion || '1.0.0';
       const calibrated = applyOffsets(rawRecord);
       const detailKey = `${calibrated.Location || 'Unknown'}_${calibrated.Device || 'Unknown'}`;
       calibrated.testDetail = deviceDetails[detailKey] || '';
       return calibrated;
     });
 
-    if (results.length === 0) {
-      // Return mock data if database has no records
-      return res.json(mockDevices.map(d => applyOffsets(simulatorStates[d.device].history[simulatorStates[d.device].history.length - 1])));
-    }
-
     return res.json(results);
   } catch (err) {
-    console.error('Error fetching live data from InfluxDB:', err);
-    // Fallback on error
-    const fallback = mockDevices.map(d => applyOffsets(simulatorStates[d.device].history[simulatorStates[d.device].history.length - 1]));
-    return res.json(fallback);
+    console.error('Error fetching live data from InfluxDB:', err.message || err);
+    return res.json([]);
   }
 });
 
 // 3. Get historical data for charts
 app.get('/api/history', async (req, res) => {
-  const device = req.query.device || 'BatteryLog';
-  const location = req.query.location || 'Starwatt-Lab';
+  const device = req.query.device || deviceFilter.device || 'BatLog';
+  const location = req.query.location || deviceFilter.location || 'Starwatt-Lab';
+  const measurement = req.query.measurement || deviceFilter.measurement || 'BatteryLogger';
   const range = req.query.range || '24h';
   const start = req.query.start;
   const end = req.query.end;
+  const testStartTime = req.query.testStartTime || deviceFilter.testStartTime;
 
   let timeRangeStart = `-${range}`;
   let timeRangeStop = 'now()';
@@ -552,50 +352,25 @@ app.get('/api/history', async (req, res) => {
     windowSize = req.query.aggregate; // Allow override
   }
 
-  if (isMockModeActive) {
-    const state = simulatorStates[device];
-    if (!state) return res.status(404).json({ error: 'Device not found' });
-
-    // Filter local history array based on range
-    let filteredHistory = [...state.history];
-    const rangeMs = parseRangeToMs(range);
-    
-    if (range !== 'custom' && rangeMs > 0) {
-      const cutOff = Date.now() - rangeMs;
-      filteredHistory = filteredHistory.filter(pt => new Date(pt._time).getTime() >= cutOff);
-    } else if (range === 'custom' && start && end) {
-      const startMs = new Date(start).getTime();
-      const endMs = new Date(end).getTime();
-      filteredHistory = filteredHistory.filter(pt => {
-        const t = new Date(pt._time).getTime();
-        return t >= startMs && t <= endMs;
-      });
-    }
-
-    // Downsample the history if it's too large for the frontend charts
-    const maxPoints = 300;
-    if (filteredHistory.length > maxPoints) {
-      const step = Math.ceil(filteredHistory.length / maxPoints);
-      filteredHistory = filteredHistory.filter((_, idx) => idx % step === 0);
-    }
-
-    const result = filteredHistory.map(pt => applyOffsets(pt));
-    return res.json(result);
+  // Real InfluxDB historical query
+  let filterStr = '';
+  if (testStartTime && testStartTime !== 'all') {
+    filterStr = `|> filter(fn: (r) => r["TestStartTime"] == "${testStartTime}")`;
   }
 
-  // Real InfluxDB historical query
   const fluxQuery = `
     from(bucket: "${activeConfig.bucket}")
       |> range(start: ${timeRangeStart}, stop: ${timeRangeStop})
-      |> filter(fn: (r) => r["_measurement"] == "BatteryLogger")
+      |> filter(fn: (r) => r["_measurement"] == "${measurement}")
       |> filter(fn: (r) => r["Location"] == "${location}")
       |> filter(fn: (r) => r["Device"] == "${device}")
+      ${filterStr}
       |> aggregateWindow(every: ${windowSize}, fn: last, createEmpty: false)
       |> yield(name: "last")
   `;
 
   try {
-    const rows = await influxQueryApi.collectRows(fluxQuery);
+    const rows = await withTimeout(influxQueryApi.collectRows(fluxQuery), 15000);
     
     // Group cells by timestamp to reconstruct records
     const timeGroups = {};
@@ -606,10 +381,19 @@ app.get('/api/history', async (req, res) => {
           _time: timeStr,
           Location: row.Location,
           Device: row.Device,
-          Config: row.Config,
+          TestStartTime: parseInt(row.TestStartTime) || 0
         };
       }
-      timeGroups[timeStr][row._field] = parseFloat(row._value) || row._value;
+      const field = row._field;
+      const rawVal = row._value;
+      const numVal = parseFloat(rawVal);
+      if (field === 'Config' || field === 'FirmwareVersion' || field === 'OtaEnabled') {
+        timeGroups[timeStr][field] = rawVal;
+      } else if (field === 'ChargingState') {
+        timeGroups[timeStr]['Status'] = isNaN(numVal) ? 0 : numVal;
+      } else {
+        timeGroups[timeStr][field] = isNaN(numVal) ? rawVal : numVal;
+      }
     });
 
     const result = Object.values(timeGroups)
@@ -618,24 +402,11 @@ app.get('/api/history', async (req, res) => {
 
     return res.json(result);
   } catch (err) {
-    console.error('Error fetching historical data from InfluxDB:', err);
+    console.error('Error fetching historical data from InfluxDB:', err.message || err);
     // Return empty array on error rather than breaking
     return res.json([]);
   }
 });
-
-// Helper for parsing range to ms (mock mode)
-function parseRangeToMs(range) {
-  const match = range.match(/^(\d+)([shdm])$/);
-  if (!match) return 86400000; // default 24h
-  const num = parseInt(match[1]);
-  const unit = match[2];
-  if (unit === 's') return num * 1000;
-  if (unit === 'm') return num * 60 * 1000;
-  if (unit === 'h') return num * 60 * 60 * 1000;
-  if (unit === 'd') return num * 24 * 60 * 60 * 1000;
-  return 86400000;
-}
 
 // 4. Calibration Offsets endpoints
 app.get('/api/offsets', (req, res) => {
@@ -647,6 +418,34 @@ app.post('/api/offsets', (req, res) => {
   fs.writeFileSync(OFFSETS_FILE, JSON.stringify(offsets, null, 2), 'utf8');
   console.log('Offsets configuration updated.');
   return res.json({ success: true, offsets });
+});
+
+// Test start times endpoint
+app.get('/api/test-start-times', async (req, res) => {
+  const device = req.query.device || deviceFilter.device || 'BatLog';
+  const location = req.query.location || deviceFilter.location || 'Starwatt-Lab';
+  const measurement = req.query.measurement || deviceFilter.measurement || 'BatteryLogger';
+
+  const fluxQuery = `
+    from(bucket: "${activeConfig.bucket}")
+      |> range(start: -30d)
+      |> filter(fn: (r) => r["_measurement"] == "${measurement}")
+      |> filter(fn: (r) => r["Location"] == "${location}")
+      |> filter(fn: (r) => r["Device"] == "${device}")
+      |> keep(columns: ["TestStartTime"])
+      |> group()
+      |> distinct(column: "TestStartTime")
+  `;
+
+  try {
+    const rows = await influxQueryApi.collectRows(fluxQuery);
+    const runs = rows.map(r => parseInt(r._value)).filter(v => !isNaN(v));
+    runs.sort((a, b) => b - a); // descending order
+    return res.json(runs);
+  } catch (err) {
+    console.error('Error fetching test-start-times:', err);
+    return res.json([]);
+  }
 });
 
 // 5. Device descriptions/details endpoints
@@ -664,6 +463,71 @@ app.post('/api/details', (req, res) => {
     return res.json({ success: true, deviceDetails });
   }
   return res.status(400).json({ error: 'Missing location or device parameter' });
+});
+
+// Telemetry filter options endpoint (queries InfluxDB for existing tags)
+app.get('/api/filter-options', async (req, res) => {
+  try {
+    // Query unique measurements
+    const measQuery = `
+      import "influxdata/influxdb/schema"
+      schema.measurements(bucket: "${activeConfig.bucket}")
+    `;
+    let measurements = ['BatteryLogger'];
+    try {
+      const measRows = await influxQueryApi.collectRows(measQuery);
+      const mList = measRows.map(r => r._value).filter(Boolean);
+      if (mList.length > 0) measurements = [...new Set(mList)];
+    } catch (e) {
+      console.warn('Failed to query measurements from InfluxDB, using default:', e.message);
+    }
+
+    // Query unique devices and locations
+    const devQuery = `
+      from(bucket: "${activeConfig.bucket}")
+        |> range(start: -30d)
+        |> group(columns: ["Device", "Location"])
+        |> last()
+    `;
+    let locations = ['Starwatt-Lab'];
+    let devices = ['BatLog'];
+    try {
+      const devRows = await influxQueryApi.collectRows(devQuery);
+      const locList = devRows.map(r => r.Location).filter(Boolean);
+      const devList = devRows.map(r => r.Device).filter(Boolean);
+      if (locList.length > 0) locations = [...new Set(locList)];
+      if (devList.length > 0) devices = [...new Set(devList)];
+    } catch (e) {
+      console.warn('Failed to query devices/locations from InfluxDB:', e.message);
+    }
+
+    return res.json({ measurements, locations, devices });
+  } catch (err) {
+    console.error('Error fetching filter options:', err);
+    return res.json({
+      measurements: ['BatteryLogger'],
+      locations: ['Starwatt-Lab'],
+      devices: ['BatLog']
+    });
+  }
+});
+
+// Telemetry filters endpoint
+app.get('/api/filter', (req, res) => {
+  return res.json(deviceFilter);
+});
+
+app.post('/api/filter', (req, res) => {
+  const { measurement, location, device, testStartTime } = req.body;
+  deviceFilter = {
+    measurement: measurement || 'BatteryLogger',
+    location: location || 'all',
+    device: device || 'all',
+    testStartTime: testStartTime || 'all'
+  };
+  fs.writeFileSync(FILTER_FILE, JSON.stringify(deviceFilter, null, 2), 'utf8');
+  console.log('Telemetry device filter configuration updated:', deviceFilter);
+  return res.json({ success: true, filter: deviceFilter });
 });
 
 // 6. Get Database Configuration

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Cpu, Zap, Thermometer, Battery, ShieldAlert, ChevronRight, Edit3 } from 'lucide-react';
+import { Cpu, Zap, Thermometer, Battery, ShieldAlert, ChevronRight, Edit3, Settings, Save, ChevronUp, ChevronDown } from 'lucide-react';
 
 function Sparkline({ device, location }) {
   const [points, setPoints] = useState([]);
@@ -64,8 +64,74 @@ function Sparkline({ device, location }) {
   );
 }
 
-function Dashboard({ liveData, onEditDetails, onNavigateToAnalytics }) {
+const formatRunTime = (runVal) => {
+  if (runVal === 'all') return 'all (No Filter)';
+  if (runVal === '0' || Number(runVal) === 0) return '0 (Unassigned Run)';
+  const num = Number(runVal);
+  if (isNaN(num)) return runVal;
+  
+  const ms = num < 10000000000 ? num * 1000 : num;
+  const date = new Date(ms);
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+};
+
+function Dashboard({ liveData, onEditDetails, onNavigateToAnalytics, filter, onSaveFilter, filterOptions }) {
   const [descriptions, setDescriptions] = useState({});
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [filterFields, setFilterFields] = useState({
+    measurement: 'BatteryLogger',
+    location: 'Starwatt-Lab',
+    device: 'BatLog',
+    testStartTime: '0'
+  });
+  const [filterSaveStatus, setFilterSaveStatus] = useState('idle');
+  const [filterRuns, setFilterRuns] = useState(['0', 'all']);
+
+  useEffect(() => {
+    if (filter) {
+      setFilterFields(filter);
+    }
+  }, [filter]);
+
+  useEffect(() => {
+    if (!filterFields.device || filterFields.device === 'all') {
+      setFilterRuns(['all', '0']);
+      return;
+    }
+    const fetchRunsForFilter = async () => {
+      try {
+        const res = await fetch(`/api/test-start-times?device=${filterFields.device}&location=${filterFields.location || 'all'}&measurement=${filterFields.measurement || 'BatteryLogger'}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` }
+        });
+        const data = await res.json();
+        setFilterRuns(['all', '0', ...data]);
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    fetchRunsForFilter();
+  }, [filterFields.device, filterFields.location, filterFields.measurement]);
+
+  const handleSaveFilterSubmit = async (e) => {
+    e.preventDefault();
+    setFilterSaveStatus('saving');
+    const success = await onSaveFilter(filterFields);
+    if (success) {
+      setFilterSaveStatus('success');
+      setTimeout(() => setFilterSaveStatus('idle'), 3000);
+      setIsFilterOpen(false);
+    } else {
+      setFilterSaveStatus('error');
+      setTimeout(() => setFilterSaveStatus('idle'), 4000);
+    }
+  };
 
   useEffect(() => {
     const descs = {};
@@ -111,6 +177,121 @@ function Dashboard({ liveData, onEditDetails, onNavigateToAnalytics }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      
+      {/* Collapsible Filter Panel */}
+      <div className={`filter-settings-panel ${isFilterOpen ? 'open' : ''}`} style={{ marginBottom: '0px' }}>
+        <button 
+          className="filter-toggle-btn" 
+          onClick={() => setIsFilterOpen(!isFilterOpen)}
+          style={{
+            width: '100%',
+            padding: '12px 20px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            background: 'rgba(30, 41, 59, 0.2)',
+            color: 'var(--text-secondary)',
+            fontSize: '13px',
+            fontWeight: '700',
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+            cursor: 'pointer',
+            textAlign: 'left',
+            borderRadius: '14px',
+            border: '1px solid rgba(255, 255, 255, 0.06)'
+          }}
+        >
+          <Settings size={16} />
+          <span>{isFilterOpen ? 'Hide InfluxDB Filters' : 'Configure InfluxDB Filters'}</span>
+          {isFilterOpen ? <ChevronUp size={16} style={{ marginLeft: 'auto' }} /> : <ChevronDown size={16} style={{ marginLeft: 'auto' }} />}
+        </button>
+        
+        {isFilterOpen && (
+          <div className="filter-panel-content" style={{ padding: '20px', background: 'rgba(15, 23, 42, 0.65)', border: '1px solid rgba(255, 255, 255, 0.08)', borderTop: 'none', borderBottomLeftRadius: '14px', borderBottomRightRadius: '14px' }}>
+            <form onSubmit={handleSaveFilterSubmit} className="filter-form" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div className="filter-inputs-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label htmlFor="filterMeasurement" style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>InfluxDB Measurement</label>
+                  <select
+                    id="filterMeasurement"
+                    value={filterFields.measurement}
+                    onChange={(e) => setFilterFields({ ...filterFields, measurement: e.target.value })}
+                    className="form-input"
+                    style={{ background: 'var(--bg-card)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '8px', color: 'var(--text-primary)', padding: '8px 12px', fontSize: '14px', width: '100%', height: '40px' }}
+                  >
+                    {filterOptions?.measurements?.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label htmlFor="filterLocation" style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>Location Tag</label>
+                  <select
+                    id="filterLocation"
+                    value={filterFields.location}
+                    onChange={(e) => setFilterFields({ ...filterFields, location: e.target.value })}
+                    className="form-input"
+                    style={{ background: 'var(--bg-card)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '8px', color: 'var(--text-primary)', padding: '8px 12px', fontSize: '14px', width: '100%', height: '40px' }}
+                  >
+                    <option value="all">all (No Filter)</option>
+                    {filterOptions?.locations?.map(l => (
+                      <option key={l} value={l}>{l}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label htmlFor="filterDevice" style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>Device Tag</label>
+                  <select
+                    id="filterDevice"
+                    value={filterFields.device}
+                    onChange={(e) => setFilterFields({ ...filterFields, device: e.target.value })}
+                    className="form-input"
+                    style={{ background: 'var(--bg-card)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '8px', color: 'var(--text-primary)', padding: '8px 12px', fontSize: '14px', width: '100%', height: '40px' }}
+                  >
+                    <option value="all">all (No Filter)</option>
+                    {filterOptions?.devices?.map(d => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label htmlFor="filterTestStartTime" style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>Test Start Time</label>
+                  <select
+                    id="filterTestStartTime"
+                    value={filterFields.testStartTime}
+                    onChange={(e) => setFilterFields({ ...filterFields, testStartTime: e.target.value })}
+                    className="form-input"
+                    style={{ background: 'var(--bg-card)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '8px', color: 'var(--text-primary)', padding: '8px 12px', fontSize: '14px', width: '100%', height: '40px' }}
+                  >
+                    {filterRuns.map(run => (
+                      <option key={run} value={run}>
+                        {formatRunTime(run)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="filter-actions" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                <button 
+                  type="submit" 
+                  className="btn btn-primary"
+                  disabled={filterSaveStatus === 'saving'}
+                >
+                  <Save size={16} />
+                  <span>{filterSaveStatus === 'saving' ? 'Saving Filter...' : 'Save & Apply Filter'}</span>
+                </button>
+                {filterSaveStatus === 'success' && (
+                  <span className="save-success-badge" style={{ fontSize: '12px', fontWeight: '600', color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', padding: '6px 12px', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>✓ Filter Applied & Saved</span>
+                )}
+                {filterSaveStatus === 'error' && (
+                  <span className="save-error-badge" style={{ fontSize: '12px', fontWeight: '600', color: '#ef4444', background: 'rgba(239, 68, 68, 0.1)', padding: '6px 12px', borderRadius: '6px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>✗ Connection Failed</span>
+                )}
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
+
       {/* Fleet Summary Banner */}
       <section className="stats-row">
         <div className="stat-card">

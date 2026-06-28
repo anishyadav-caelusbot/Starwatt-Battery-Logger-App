@@ -13,7 +13,7 @@ function Offsets({ liveData }) {
     token: '',
     org: '',
     bucket: '',
-    mockMode: true,
+    mockMode: false,
     hasToken: false
   });
   const [dbStatus, setDbStatus] = useState('idle'); // idle | testing | success | error
@@ -51,7 +51,7 @@ function Offsets({ liveData }) {
             token: '', // Keep token input empty for security
             org: data.org || '',
             bucket: data.bucket || '',
-            mockMode: data.mockMode,
+            mockMode: false,
             hasToken: data.hasToken
           });
         }
@@ -130,7 +130,7 @@ function Offsets({ liveData }) {
         url: dbConfig.url,
         org: dbConfig.org,
         bucket: dbConfig.bucket,
-        mockMode: dbConfig.mockMode
+        mockMode: false
       };
       
       // Only send token if the user typed a new one
@@ -155,7 +155,7 @@ function Offsets({ liveData }) {
           ...prev,
           token: '', // clear password input field
           hasToken: data.mode === 'live' ? true : prev.hasToken,
-          mockMode: data.mode === 'mock'
+          mockMode: false
         }));
         setTimeout(() => setDbStatus('idle'), 4000);
       } else {
@@ -202,7 +202,7 @@ function Offsets({ liveData }) {
             marginBottom: '16px'
           }}>
             <CheckCircle size={18} />
-            <span>Database configurations successfully validated and saved. Active Mode: {dbConfig.mockMode ? 'Mock Simulation' : 'Live InfluxDB'}</span>
+            <span>Database configurations successfully validated and saved.</span>
           </div>
         )}
 
@@ -237,8 +237,7 @@ function Offsets({ liveData }) {
                 placeholder="http://host.docker.internal:8086"
                 value={dbConfig.url} 
                 onChange={(e) => handleDbChange('url', e.target.value)}
-                disabled={dbConfig.mockMode}
-                required={!dbConfig.mockMode}
+                required
               />
             </div>
 
@@ -253,8 +252,7 @@ function Offsets({ liveData }) {
                 placeholder={dbConfig.hasToken ? "••••••••••••••••••••" : "Paste InfluxDB Admin Token..."}
                 value={dbConfig.token} 
                 onChange={(e) => handleDbChange('token', e.target.value)}
-                disabled={dbConfig.mockMode}
-                required={!dbConfig.hasToken && !dbConfig.mockMode}
+                required={!dbConfig.hasToken}
               />
             </div>
 
@@ -265,8 +263,7 @@ function Offsets({ liveData }) {
                 className="form-input" 
                 value={dbConfig.org} 
                 onChange={(e) => handleDbChange('org', e.target.value)}
-                disabled={dbConfig.mockMode}
-                required={!dbConfig.mockMode}
+                required
               />
             </div>
 
@@ -277,25 +274,13 @@ function Offsets({ liveData }) {
                 className="form-input" 
                 value={dbConfig.bucket} 
                 onChange={(e) => handleDbChange('bucket', e.target.value)}
-                disabled={dbConfig.mockMode}
-                required={!dbConfig.mockMode}
+                required
               />
             </div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <input 
-                type="checkbox" 
-                id="mockModeToggle"
-                checked={dbConfig.mockMode}
-                onChange={(e) => handleDbChange('mockMode', e.target.checked)}
-                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-              />
-              <label htmlFor="mockModeToggle" className="form-label" style={{ cursor: 'pointer', userSelect: 'none', color: dbConfig.mockMode ? '#38bdf8' : 'var(--text-secondary)' }}>
-                Enable High-Fidelity Simulator Mode (Offline Sandbox)
-              </label>
-            </div>
+            <div></div>
 
             <button 
               type="submit" 
